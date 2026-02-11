@@ -4,7 +4,8 @@ Remake of the Original FlappyBird Using **JS** &amp; **HTML Canvas**
 run:
 
 1. 
-py -3.12 -m pip install opencv-python mediapipe websockets \n
+py -3.12 -m pip install opencv-python mediapipe websockets
+
 py -3.12 mouth_click.py
 
 The backend will run, starting your camera. You should be able to see yourself.
