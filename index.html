@@ -1,15 +1,195 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="X-UA-Compatible" content="ie=edge">
-    <title>FlappyBird</title>
-    <link rel="stylesheet" href="style.css" > 
-    <link href="https://fonts.googleapis.com/css?family=Squada+One&display=swap" rel="stylesheet">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="ie=edge">
+  <title>FlappyBird</title>
+  <link rel="stylesheet" href="style.css">
+  <link href="https://fonts.googleapis.com/css?family=Squada+One&display=swap" rel="stylesheet">
+  <style>
+    /* ── Reset & base ─────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #1a1a2e;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 18px;
+      font-family: 'Squada One', sans-serif;
+      overflow: hidden;
+    }
+
+    /* ── Animated sky-gradient backdrop ──────────────────────────── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: linear-gradient(160deg, #0f3460 0%, #16213e 50%, #0f3460 100%);
+      z-index: -1;
+      animation: skyPulse 8s ease-in-out infinite alternate;
+    }
+    @keyframes skyPulse {
+      from { filter: brightness(1); }
+      to   { filter: brightness(1.15); }
+    }
+
+    /* ── Mode toggle panel ────────────────────────────────────────── */
+    #controls {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      user-select: none;
+    }
+
+    .mode-label {
+      color: #a8d8ea;
+      font-size: 13px;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      opacity: 0.75;
+    }
+
+    .toggle-row {
+      display: flex;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 50px;
+      padding: 4px;
+      gap: 4px;
+      backdrop-filter: blur(8px);
+    }
+
+    .mode-btn {
+      cursor: pointer;
+      border: none;
+      background: transparent;
+      color: rgba(255,255,255,0.45);
+      font-family: 'Squada One', sans-serif;
+      font-size: 14px;
+      letter-spacing: 1.5px;
+      padding: 8px 22px;
+      border-radius: 44px;
+      transition: all 0.25s cubic-bezier(.4,0,.2,1);
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      white-space: nowrap;
+    }
+
+    .mode-btn .icon {
+      font-size: 16px;
+      transition: transform 0.3s ease;
+    }
+
+    .mode-btn:hover {
+      color: rgba(255,255,255,0.75);
+    }
+
+    .mode-btn.active {
+      background: linear-gradient(135deg, #e94560, #c0392b);
+      color: #fff;
+      box-shadow: 0 4px 18px rgba(233,69,96,0.45);
+    }
+
+    .mode-btn.active .icon {
+      transform: scale(1.2);
+    }
+
+    /* ── WebSocket status badge ───────────────────────────────────── */
+    #wsStatus {
+      display: none;                 /* shown only in mouth mode */
+      align-items: center;
+      gap: 7px;
+      background: rgba(0,0,0,0.35);
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 20px;
+      padding: 5px 14px;
+      backdrop-filter: blur(6px);
+    }
+
+    .ws-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #666;
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    .ws-dot.ws-connected    { background: #2ecc71; box-shadow: 0 0 6px #2ecc71; }
+    .ws-dot.ws-disconnected { background: #e74c3c; box-shadow: 0 0 6px #e74c3c; animation: pulse 1.4s ease-in-out infinite; }
+    .ws-dot.ws-error        { background: #f39c12; box-shadow: 0 0 6px #f39c12; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.35; }
+    }
+
+    .ws-label {
+      color: rgba(255,255,255,0.55);
+      font-family: 'Squada One', sans-serif;
+      font-size: 12px;
+      letter-spacing: 1px;
+    }
+
+    /* ── Canvas ───────────────────────────────────────────────────── */
+    #canvas {
+      display: block;
+      border-radius: 12px;
+      box-shadow:
+        0 0 0 3px rgba(255,255,255,0.08),
+        0 20px 60px rgba(0,0,0,0.6),
+        0 0 80px rgba(233,69,96,0.12);
+      outline: none;
+      cursor: pointer;
+    }
+
+    /* ── Hint text ────────────────────────────────────────────────── */
+    .hint {
+      color: rgba(255,255,255,0.25);
+      font-family: 'Squada One', sans-serif;
+      font-size: 11px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+  </style>
 </head>
 <body>
-    <canvas id="canvas" width="276" height="414"></canvas>
-    <script src="game.js"></script>
+
+  <!-- Mode selector -->
+  <div id="controls">
+    <span class="mode-label">Control Mode</span>
+    <div class="toggle-row">
+      <button id="btnNormal" class="mode-btn active" onclick="setControlMode('normal')">
+        <span class="icon">🖱️</span> Click
+      </button>
+      <button id="btnNormalSound" class="mode-btn" onclick="setControlMode('normal-sound')">
+        <span class="icon">🔊</span> Click + Sound
+      </button>
+      <button id="btnMouth" class="mode-btn" onclick="setControlMode('mouth')">
+        <span class="icon">😮</span> Mouth
+      </button>
+      <button id="btnEyebrow" class="mode-btn" onclick="setControlMode('eyebrow')">
+        <span class="icon">🤨</span> Eyebrow
+      </button>
+    </div>
+
+    <!-- WS status (visible only in mouth mode) -->
+    <div id="wsStatus">
+      <span class="ws-dot ws-disconnected"></span>
+      <span class="ws-label">Face tracker: disconnected</span>
+    </div>
+  </div>
+
+  <!-- Game canvas -->
+  <canvas id="canvas" width="276" height="414"></canvas>
+
+  <span class="hint">Space / W / ↑ also works as fallback</span>
+
+  <script src="game.js"></script>
 </body>
 </html>
