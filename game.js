@@ -2,11 +2,148 @@ const RAD = Math.PI / 180;
 const scrn = document.getElementById("canvas");
 const sctx = scrn.getContext("2d");
 scrn.tabIndex = 1;
+
+// ── Control Mode ──────────────────────────────────────────────────────────────
+// "normal" = click/keyboard (no sound feedback)
+// "normal-sound" = click/keyboard (with sound feedback)
+// "mouth" = WebSocket face tracking - mouth open (with sound feedback)
+// "eyebrow" = WebSocket face tracking - eyebrow raise (no sound feedback)
+let controlMode = "normal"; // updated by UI toggle
+
+// ── WebSocket (mouth control) ─────────────────────────────────────────────────
+let ws = null;
+let wsConnected = false;
+let wsStatusEl = null;
+
+function connectWebSocket() {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+
+  ws = new WebSocket("ws://localhost:8765");
+
+  ws.onopen = () => {
+    wsConnected = true;
+    updateWsStatus("connected");
+    console.log("[WS] Connected to face tracking server");
+  };
+
+  ws.onmessage = (event) => {
+    if (controlMode !== "mouth" && controlMode !== "eyebrow") return;
+    try {
+      const msg = JSON.parse(event.data);
+      // Fire on mouth-open ("click" message from server) in mouth mode
+      if (controlMode === "mouth" && msg.type === "click") {
+        triggerAction();
+      }
+      // Fire on eyebrow-raise ("eyebrow" message from server) in eyebrow mode
+      if (controlMode === "eyebrow" && msg.type === "eyebrow") {
+        triggerAction();
+      }
+    } catch (e) {
+      console.warn("[WS] Bad message:", event.data);
+    }
+  };
+
+  ws.onclose = () => {
+    wsConnected = false;
+    updateWsStatus("disconnected");
+    console.log("[WS] Disconnected – retrying in 2s…");
+    if (controlMode === "mouth" || controlMode === "eyebrow") {
+      setTimeout(connectWebSocket, 2000);
+    }
+  };
+
+  ws.onerror = () => {
+    updateWsStatus("error");
+    ws.close();
+  };
+}
+
+function disconnectWebSocket() {
+  if (ws) {
+    ws.onclose = null; // prevent auto-reconnect
+    ws.close();
+    ws = null;
+    wsConnected = false;
+    updateWsStatus("disconnected");
+  }
+}
+
+function updateWsStatus(status) {
+  if (!wsStatusEl) wsStatusEl = document.getElementById("wsStatus");
+  if (!wsStatusEl) return;
+  const dot = wsStatusEl.querySelector(".ws-dot");
+  const label = wsStatusEl.querySelector(".ws-label");
+  if (!dot || !label) return;
+
+  dot.className = "ws-dot";
+  switch (status) {
+    case "connected":
+      dot.classList.add("ws-connected");
+      label.textContent = "Face tracker: connected";
+      break;
+    case "disconnected":
+      dot.classList.add("ws-disconnected");
+      label.textContent = "Face tracker: disconnected";
+      break;
+    case "error":
+      dot.classList.add("ws-error");
+      label.textContent = "Face tracker: error";
+      break;
+    default:
+      label.textContent = "Face tracker: …";
+  }
+}
+
+// ── Mode toggle (called from HTML buttons) ────────────────────────────────────
+function setControlMode(mode) {
+  controlMode = mode;
+
+  const btnNormal = document.getElementById("btnNormal");
+  const btnNormalSound = document.getElementById("btnNormalSound");
+  const btnMouth  = document.getElementById("btnMouth");
+  const btnEyebrow = document.getElementById("btnEyebrow");
+  const wsStatusEl = document.getElementById("wsStatus");
+
+  if (btnNormal) btnNormal.classList.toggle("active", mode === "normal");
+  if (btnNormalSound) btnNormalSound.classList.toggle("active", mode === "normal-sound");
+  if (btnMouth)  btnMouth.classList.toggle("active",  mode === "mouth");
+  if (btnEyebrow) btnEyebrow.classList.toggle("active", mode === "eyebrow");
+  if (wsStatusEl) wsStatusEl.style.display = (mode === "mouth" || mode === "eyebrow") ? "flex" : "none";
+
+  if (mode === "mouth" || mode === "eyebrow") {
+    connectWebSocket();
+    // Refocus canvas so keyboard still works as fallback
+    scrn.focus();
+  } else {
+    disconnectWebSocket();
+    scrn.focus();
+  }
+}
+
+// ── Click / key input (normal modes) ──────────────────────────────────────────
 scrn.addEventListener("click", () => {
+  if (controlMode === "mouth" || controlMode === "eyebrow") return;  // only respond in normal/normal-sound modes
+  triggerAction();
+});
+
+scrn.onkeydown = function keyDown(e) {
+  if (e.keyCode == 32 || e.keyCode == 87 || e.keyCode == 38) {
+    // Space / W / Arrow-up — works in both modes as fallback
+    triggerAction();
+  }
+};
+
+function triggerAction() {
+  // Only use audio feedback in "normal-sound" and "mouth" modes
+  const useAudioFeedback = (controlMode === "normal-sound" || controlMode === "mouth");
+  
   switch (state.curr) {
     case state.getReady:
       state.curr = state.Play;
       SFX.start.play();
+      if (useAudioFeedback) {
+        AudioFeedback.start();   // begin proximity tone
+      }
       break;
     case state.Play:
       bird.flap();
@@ -18,33 +155,118 @@ scrn.addEventListener("click", () => {
       pipe.pipes = [];
       UI.score.curr = 0;
       SFX.played = false;
+      if (useAudioFeedback) {
+        AudioFeedback.stop();    // silence tone on restart
+      }
       break;
   }
-});
+}
 
-scrn.onkeydown = function keyDown(e) {
-  if (e.keyCode == 32 || e.keyCode == 87 || e.keyCode == 38) {
-    // Space Key or W key or arrow up
-    switch (state.curr) {
-      case state.getReady:
-        state.curr = state.Play;
-        SFX.start.play();
-        break;
-      case state.Play:
-        bird.flap();
-        break;
-      case state.gameOver:
-        state.curr = state.getReady;
-        bird.speed = 0;
-        bird.y = 100;
-        pipe.pipes = [];
-        UI.score.curr = 0;
-        SFX.played = false;
-        break;
-    }
+// ── Accessibility: Proximity Sound Feedback ───────────────────────────────────
+//
+// Plays a continuous synthesised tone throughout gameplay.
+// Pitch encodes the bird's vertical position relative to the pipe gap:
+//
+//   Bird ABOVE gap centre → HIGH pitch (330 → 900 Hz as it nears the top pipe)
+//   Bird at gap centre    → neutral mid tone ~330 Hz
+//   Bird BELOW gap centre → LOW pitch  (330 → 80 Hz  as it nears the bottom pipe)
+//
+// The gradient is smooth and continuous — pitch rises as the bird floats up,
+// drops as it falls. A blind player can hear exactly which direction to flap.
+// No audio files needed — fully synthesised via Web Audio API.
+
+const AudioFeedback = (() => {
+  let ctx     = null;   // AudioContext (lazy-created on first user gesture)
+  let osc     = null;   // OscillatorNode
+  let gain    = null;   // GainNode (master volume)
+  let running = false;
+
+  const FREQ_LOW    = 150;   // Hz – bird far below gap centre (about to hit floor pipe)
+  const FREQ_SAFE   = 330;   // Hz – bird at gap centre (neutral)
+  const FREQ_DANGER = 900;   // Hz – bird far above gap centre (about to hit top pipe)
+  const GLIDE       = 0.07;  // seconds for pitch to glide to new target
+
+  function _init() {
+    if (ctx) return;
+    ctx  = new (window.AudioContext || window.webkitAudioContext)();
+    gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, ctx.currentTime);
+    gain.connect(ctx.destination);
+    osc  = ctx.createOscillator();
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(FREQ_SAFE, ctx.currentTime);
+    osc.connect(gain);
+    osc.start();
   }
-};
 
+  // Call once when Play begins (resumes AudioContext if suspended)
+  function start() {
+    _init();
+    if (ctx.state === "suspended") ctx.resume();
+    gain.gain.cancelScheduledValues(ctx.currentTime);
+    gain.gain.setValueAtTime(gain.gain.value, ctx.currentTime);
+    gain.gain.linearRampToValueAtTime(0.45, ctx.currentTime + 0.08);
+    running = true;
+  }
+
+  // Fade out and silence when not playing
+  function stop() {
+    if (!ctx || !running) return;
+    gain.gain.cancelScheduledValues(ctx.currentTime);
+    gain.gain.setValueAtTime(gain.gain.value, ctx.currentTime);
+    gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.12);
+    running = false;
+  }
+
+  // Called every frame during Play.
+  //   birdY  – bird centre Y (px)
+  //   birdR  – bird collision radius (px)
+  //   roof   – bottom edge of top pipe (px)  ← smaller Y value (higher on screen)
+  //   floor  – top edge of bottom pipe (px)  ← larger Y value  (lower on screen)
+  //   birdX  – bird centre X (px)
+  //   pipeX  – left edge of nearest pipe (px)
+  //   pipeW  – pipe width (px)
+  //
+  // Pitch mapping (canvas Y increases downward):
+  //   Bird ABOVE gap centre → HIGH pitch (330 → 900 Hz as bird nears top pipe)
+  //   Bird BELOW gap centre → LOW pitch  (330 → 80 Hz  as bird nears bot pipe)
+  //   Bird at gap centre    → neutral mid tone ~330 Hz
+  function update(birdY, birdR, roof, floor, birdX, pipeX, pipeW) {
+    if (!ctx || !running) return;
+
+    const gapCentre = (roof + floor) / 2;
+    const halfGap   = (floor - roof) / 2;   // gap centre → either edge
+
+    // signed offset: negative = bird is above centre, positive = below centre
+    const offset = birdY - gapCentre;
+
+    // normalised 0→1 where 1 = exactly at the pipe edge (or beyond)
+    const norm = Math.min(Math.abs(offset) / halfGap, 1.2);
+
+    let targetFreq;
+    if (offset < 0) {
+      // Bird is ABOVE gap centre → HIGH pitch, scaling up toward danger
+      // 0 = centre (330 Hz) … 1 = top pipe edge (900 Hz)
+      targetFreq = FREQ_SAFE + (FREQ_DANGER - FREQ_SAFE) * Math.pow(norm, 0.7);
+    } else {
+      // Bird is BELOW gap centre → LOW pitch, scaling down toward danger
+      // 0 = centre (330 Hz) … 1 = bottom pipe edge (80 Hz)
+      targetFreq = FREQ_SAFE - (FREQ_SAFE - FREQ_LOW) * Math.pow(norm, 0.7);
+    }
+
+    // Clamp to audible range
+    targetFreq = Math.max(FREQ_LOW, Math.min(targetFreq, 1100));
+
+    // Smoothly glide to new pitch
+    osc.frequency.cancelScheduledValues(ctx.currentTime);
+    osc.frequency.setValueAtTime(osc.frequency.value, ctx.currentTime);
+    osc.frequency.linearRampToValueAtTime(targetFreq, ctx.currentTime + GLIDE);
+  }
+
+  return { start, stop, update };
+})();
+
+// ── Game state ────────────────────────────────────────────────────────────────
 let frames = 0;
 let dx = 2;
 const state = {
@@ -157,8 +379,11 @@ const bird = {
         this.speed += this.gravity;
         if (this.y + r >= gnd.y || this.collisioned()) {
           state.curr = state.gameOver;
+          // Only stop audio feedback if it's enabled
+          if (controlMode === "normal-sound" || controlMode === "mouth") {
+            AudioFeedback.stop();   // silence proximity tone on death
+          }
         }
-
         break;
       case state.gameOver:
         this.frame = 1;
@@ -175,7 +400,6 @@ const bird = {
             SFX.played = true;
           }
         }
-
         break;
     }
     this.frame = this.frame % this.animations.length;
@@ -281,7 +505,6 @@ const UI = {
           sctx.fillText(sc, scrn.width / 2 - 85, scrn.height / 2 + 15);
           sctx.strokeText(sc, scrn.width / 2 - 85, scrn.height / 2 + 15);
         }
-
         break;
     }
   },
@@ -321,6 +544,19 @@ function update() {
   gnd.update();
   pipe.update();
   UI.update();
+
+  // ── Audio proximity feedback (only in normal-sound and mouth modes) ──────────
+  if ((controlMode === "normal-sound" || controlMode === "mouth") && 
+      state.curr === state.Play && 
+      pipe.pipes.length) {
+    const p      = pipe.pipes[0];
+    const birdSp = bird.animations[0].sprite;
+    const birdR  = (birdSp.height + birdSp.width) / 4;
+    const roof   = p.y + parseFloat(pipe.top.sprite.height);
+    const floor  = roof + pipe.gap;
+    const pipeW  = parseFloat(pipe.top.sprite.width);
+    AudioFeedback.update(bird.y, birdR, roof, floor, bird.x, p.x, pipeW);
+  }
 }
 
 function draw() {
@@ -328,7 +564,6 @@ function draw() {
   sctx.fillRect(0, 0, scrn.width, scrn.height);
   bg.draw();
   pipe.draw();
-
   bird.draw();
   gnd.draw();
   UI.draw();
